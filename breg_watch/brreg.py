@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from email.message import Message
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 
 BASE_URL = "https://data.brreg.no/regnskapsregisteret/regnskap"
-ENTITY_BASE_URL = "https://data.brreg.no/enhetsregisteret/api/enheter"
+REGISTRY_BASE_URL = "https://data.brreg.no/enhetsregisteret/api"
+ENTITY_BASE_URL = f"{REGISTRY_BASE_URL}/enheter"
 
 
 class BrregError(RuntimeError):
@@ -84,6 +86,7 @@ class BrregClient:
         *,
         base_url: str = BASE_URL,
         entity_base_url: str = ENTITY_BASE_URL,
+        registry_base_url: str = REGISTRY_BASE_URL,
         transport: Transport = urllib_transport,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
@@ -96,6 +99,7 @@ class BrregClient:
             raise ValueError("Invalid BRREG client timing configuration")
         self.base_url = base_url.rstrip("/")
         self.entity_base_url = entity_base_url.rstrip("/")
+        self.registry_base_url = registry_base_url.rstrip("/")
         self.transport = transport
         self.sleep = sleep
         self.monotonic = monotonic
@@ -161,15 +165,133 @@ class BrregClient:
         name = result.data.get("navn")
         if response_orgnr != orgnr or not isinstance(name, str) or not name.strip():
             raise InvalidResponse("Entity response has an unexpected identity")
-        deleted = bool(
-            result.data.get("slettedato") or result.data.get("erSlettet") is True
-        )
+        deleted = bool(result.data.get("slettedato") or result.data.get("erSlettet") is True)
         status = "deleted" if deleted else "active"
         return RegisteredEntity(orgnr, name.strip(), status)
 
+    def entity_details(self, orgnr: str) -> JsonResponse:
+        response = self._request(
+            f"{self.registry_base_url}/enheter/{orgnr}", accepted_statuses=(404, 410)
+        )
+        if response.status in {404, 410}:
+            status = "removed" if response.status == 410 else "unknown"
+            payload = {"organisasjonsnummer": orgnr, "_registryStatus": status}
+            raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            return JsonResponse(data=payload, raw=raw)
+        result = self._json(response)
+        if not isinstance(result.data, dict) or result.data.get("organisasjonsnummer") != orgnr:
+            raise InvalidResponse("Entity detail response has an unexpected identity")
+        return result
+
+    def roles(self, orgnr: str) -> JsonResponse:
+        response = self._request(
+            f"{self.registry_base_url}/enheter/{orgnr}/roller", not_found_ok=True
+        )
+        if response.status == 404:
+            return JsonResponse(data={"rollegrupper": []}, raw=b'{"rollegrupper":[]}')
+        result = self._json(response)
+        if not isinstance(result.data, dict) or not isinstance(result.data.get("rollegrupper", []), list):
+            raise InvalidResponse("Roles response must contain rollegrupper")
+        return result
+
+    def entity_updates(
+        self,
+        orgnrs: Sequence[str],
+        *,
+        after_time: str | None = None,
+        after_id: int | None = None,
+        size: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if not orgnrs:
+            return []
+        if (after_time is None) == (after_id is None):
+            raise ValueError("Exactly one entity update cursor must be supplied")
+        events: dict[int, dict[str, Any]] = {}
+        for chunk in self._chunks(orgnrs, 150):
+            page = 0
+            while True:
+                params: dict[str, Any] = {
+                    "organisasjonsnummer": ",".join(chunk),
+                    "includeChanges": "true",
+                    "page": page,
+                    "size": size,
+                    "sort": "id,ASC",
+                }
+                if after_id is not None:
+                    params["oppdateringsid"] = after_id + 1
+                else:
+                    params["dato"] = after_time
+                result = self._json(
+                    self._request(
+                        f"{self.registry_base_url}/oppdateringer/enheter?{urllib.parse.urlencode(params, safe=',')}"
+                    )
+                )
+                if not isinstance(result.data, dict):
+                    raise InvalidResponse("Entity updates response must be a JSON object")
+                embedded = result.data.get("_embedded", {})
+                items = embedded.get("oppdaterteEnheter", []) if isinstance(embedded, dict) else []
+                if not isinstance(items, list):
+                    raise InvalidResponse("Entity updates response has invalid items")
+                for item in items:
+                    if not isinstance(item, dict) or not isinstance(item.get("oppdateringsid"), int):
+                        raise InvalidResponse("Entity update has invalid id")
+                    events[item["oppdateringsid"]] = item
+                page_info = result.data.get("page", {})
+                total_pages = page_info.get("totalPages", 1) if isinstance(page_info, dict) else 1
+                if not isinstance(total_pages, int) or page + 1 >= total_pages:
+                    break
+                page += 1
+        return [events[key] for key in sorted(events)]
+
+    def role_updates(
+        self,
+        orgnrs: Sequence[str],
+        *,
+        after_time: str | None = None,
+        after_id: int | None = None,
+        size: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if not orgnrs:
+            return []
+        if (after_time is None) == (after_id is None):
+            raise ValueError("Exactly one role update cursor must be supplied")
+        events: dict[int, dict[str, Any]] = {}
+        for chunk in self._chunks(orgnrs, 150):
+            chunk_after_id = after_id
+            chunk_after_time = after_time
+            while True:
+                params: dict[str, Any] = {
+                    "organisasjonsnummer": ",".join(chunk),
+                    "size": size,
+                }
+                if chunk_after_id is not None:
+                    params["afterId"] = chunk_after_id
+                else:
+                    params["afterTime"] = chunk_after_time
+                result = self._json(
+                    self._request(
+                        f"{self.registry_base_url}/oppdateringer/roller?{urllib.parse.urlencode(params, safe=',')}"
+                    )
+                )
+                if not isinstance(result.data, list):
+                    raise InvalidResponse("Role updates response must be a JSON list")
+                for item in result.data:
+                    event_id = item.get("id") if isinstance(item, dict) else None
+                    if not isinstance(event_id, int):
+                        raise InvalidResponse("Role update has invalid id")
+                    events[event_id] = item
+                if len(result.data) < size:
+                    break
+                next_id = max(int(item["id"]) for item in result.data)
+                if chunk_after_id == next_id:
+                    raise InvalidResponse("Role update cursor did not advance")
+                chunk_after_id = next_id
+                chunk_after_time = None
+        return [events[key] for key in sorted(events)]
+
     def _json(self, response: HttpResponse) -> JsonResponse:
         content_type = self._header(response.headers, "Content-Type").split(";", 1)[0].strip().lower()
-        if content_type not in {"application/json", "application/hal+json"}:
+        if content_type != "application/json" and not content_type.endswith("+json"):
             raise InvalidResponse(f"Unexpected JSON content type: {content_type or 'missing'}")
         try:
             data = json.loads(response.body.decode("utf-8"))
@@ -233,3 +355,7 @@ class BrregClient:
             if key.lower() == wanted:
                 return value
         return ""
+
+    @staticmethod
+    def _chunks(values: Sequence[str], size: int) -> list[list[str]]:
+        return [list(values[index : index + size]) for index in range(0, len(values), size)]
