@@ -168,6 +168,23 @@ jobs:
             --timeout 60 \
             --redact-output
 
+      - name: Monitor capital, subunits and merger/demerger notices privately
+        id: structural
+        if: github.event_name == 'schedule' || inputs.operation == 'run'
+        timeout-minutes: 15
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SLACK_WEBHOOK_URL" ]]; then
+            echo "SLACK_WEBHOOK_URL secret is not configured" >&2
+            exit 1
+          fi
+          python3 -m breg_watch.structural_monitor \
+            --notify slack \
+            --timeout 60 \
+            --redact-output
+
       - name: Enforce private Git storage budget
         id: budget
         if: always() && (github.event_name == 'schedule' || inputs.operation == 'run')
