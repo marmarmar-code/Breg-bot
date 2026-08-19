@@ -9,6 +9,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Sequence
 
+from .slack_format import combine_alert_blocks, format_alert_block
+
 
 class NotificationError(RuntimeError):
     """A notification could not be delivered."""
@@ -133,17 +135,26 @@ class SlackNotifier:
     def notify(self, run_id: str, filings: list[dict[str, Any]]) -> str:
         if not filings:
             raise ValueError("A notification requires at least one new filing")
-        lines = ["*Nytt årsregnskap oppdaget i BRREG*", ""]
+        blocks = []
         for filing in filings:
-            lines.append(
-                f"• *{filing['company_name']}* ({filing['orgnr']}) — "
-                f"periode til {filing.get('period_to') or 'ukjent'}, "
-                f"BRREG-ID {filing['report_id']}"
+            period_to = str(filing.get("period_to") or "ukjent")
+            source_url = filing.get("source_url")
+            if not isinstance(source_url, str) or not source_url.startswith("https://"):
+                source_url = _annual_report_url(filing)
+            blocks.append(
+                format_alert_block(
+                    kind="NYTT ÅRSREGNSKAP",
+                    company_name=str(filing["company_name"]),
+                    orgnr=str(filing["orgnr"]),
+                    changes=(
+                        f"Periode til: {period_to}",
+                        f"BRREG-ID: {filing['report_id']}",
+                    ),
+                    source_url=source_url,
+                    source_label="Åpne årsregnskapet hos BRREG →",
+                )
             )
-            reference = filing.get("archive_reference")
-            if isinstance(reference, str) and reference.startswith("https://"):
-                lines.append(f"  Dokument: {reference}")
-        self.send_text("\n".join(lines))
+        self.send_text(combine_alert_blocks(blocks))
         return f"slack:{run_id}"
 
     def send_text(self, text: str) -> None:
@@ -175,3 +186,15 @@ class SlackNotifier:
             if last_status is not None
             else "Slack notification failed"
         )
+
+
+def _annual_report_url(filing: dict[str, Any]) -> str | None:
+    orgnr = str(filing.get("orgnr") or "")
+    period_to = str(filing.get("period_to") or "")
+    if len(orgnr) != 9 or not orgnr.isdigit() or len(period_to) < 4 or not period_to[:4].isdigit():
+        return None
+    year = period_to[:4]
+    return (
+        "https://data.brreg.no/regnskapsregisteret/regnskap/"
+        f"aarsregnskap/kopi/{orgnr}/{year}"
+    )
