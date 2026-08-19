@@ -120,9 +120,7 @@ class RegistryMonitorTests(unittest.TestCase):
 
     def test_first_run_creates_silent_complete_baseline(self):
         notifier = RecordingNotifier()
-
         result = self.service(notifier).run([self.company])
-
         self.assertTrue(result["baseline"])
         self.assertEqual(result["alerts"], 0)
         self.assertEqual(notifier.messages, [])
@@ -138,10 +136,11 @@ class RegistryMonitorTests(unittest.TestCase):
         notifier = RecordingNotifier()
         service = self.service(notifier)
         service.run([self.company])
-
         self.client.entity_payload = entity("FIKTIVT NYTT NAVN AS", bankrupt=True)
         self.client.roles_payload = roles(manager="Dina Ny")
-        self.client.entity_events = [{"oppdateringsid": 101, "organisasjonsnummer": ORGNR}]
+        self.client.entity_events = [
+            {"oppdateringsid": 101, "organisasjonsnummer": ORGNR, "endringstype": "Endring"}
+        ]
         self.client.role_events = [{"id": 202, "data": {"organisasjonsnummer": ORGNR}}]
 
         result = service.run([self.company])
@@ -156,16 +155,31 @@ class RegistryMonitorTests(unittest.TestCase):
         state = self.repository.read_state()
         self.assertEqual(state["entity_after_id"], 101)
         self.assertEqual(state["role_after_id"], 202)
-        self.assertEqual(
-            self.repository.read_snapshot(ORGNR)["roles"]["DAGL"], ["Dina Ny"]
-        )
+        self.assertEqual(self.repository.read_snapshot(ORGNR)["roles"]["DAGL"], ["Dina Ny"])
+
+    def test_deletion_update_alerts_even_when_entity_detail_is_already_gone(self):
+        notifier = RecordingNotifier()
+        service = self.service(notifier)
+        service.run([self.company])
+        self.client.entity_payload = {
+            "organisasjonsnummer": ORGNR,
+            "_registryStatus": "unknown",
+        }
+        self.client.entity_events = [
+            {"oppdateringsid": 150, "organisasjonsnummer": ORGNR, "endringstype": "Sletting"}
+        ]
+
+        result = service.run([self.company])
+
+        self.assertEqual(result["alerts"], 1)
+        self.assertIn("Slettet fra Enhetsregisteret: ja", notifier.messages[0])
+        self.assertEqual(self.repository.read_state()["entity_after_id"], 150)
 
     def test_failed_slack_does_not_advance_snapshot_or_cursors(self):
         baseline = self.service(RecordingNotifier())
         baseline.run([self.company])
         before = self.repository.read_snapshot(ORGNR)
         state_before = self.repository.read_state()
-
         self.client.roles_payload = roles(manager="Dina Ny")
         self.client.role_events = [{"id": 203, "data": {"organisasjonsnummer": ORGNR}}]
         failing = RegistryMonitorService(
@@ -188,7 +202,6 @@ class RegistryMonitorTests(unittest.TestCase):
         logger.propagate = False
         logger.handlers = [logging.StreamHandler(stream)]
         logger.setLevel(logging.INFO)
-
         self.service(RecordingNotifier(), logger=logger, redact=True).run([self.company])
 
         output = stream.getvalue()
