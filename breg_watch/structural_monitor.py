@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from .brreg import BrregClient, BrregError, InvalidResponse, TransientBrregError
 from .companies import Company, CompanyListError, load_companies
 from .notifier import NotificationError, SlackNotifier
+from .slack_format import combine_alert_blocks, format_alert_block
 
 
 PUBLIC_RUNNER_ENV = "BREG_PUBLIC_RUNNER"
@@ -498,9 +499,14 @@ class StructuralMonitorService:
             if company is None:
                 continue
             alerts.append(
-                f"*{company.name}* ({item['orgnr']})\n"
-                f"– {item['type']} registrert {item['date']}\n"
-                f"– {item['url']}"
+                format_alert_block(
+                    kind=_announcement_kind(item["type"]),
+                    company_name=company.name,
+                    orgnr=item["orgnr"],
+                    changes=(f"{item['type']} registrert {item['date']}",),
+                    source_url=item["url"],
+                    source_label="Se kunngjøringen hos BRREG →",
+                )
             )
         return alerts
 
@@ -599,11 +605,16 @@ def diff_subunit(previous: Any, current: Any, *, event_type: str) -> list[str]:
 
 
 def format_slack_alert(alerts: list[str]) -> str:
-    return "*Nye strukturelle BRREG-endringer*\n\n" + "\n\n".join(alerts) + "\n\nKilde: Brønnøysundregistrene"
+    return combine_alert_blocks(alerts)
 
 
 def _format_company_changes(name: str, orgnr: str, changes: list[str]) -> str:
-    return f"*{name}* ({orgnr})\n" + "\n".join(f"– {change}" for change in changes)
+    return format_alert_block(
+        kind="KAPITALENDRING",
+        company_name=name,
+        orgnr=orgnr,
+        changes=changes,
+    )
 
 
 def _format_subunit_new(value: dict[str, Any], parent: Company | None) -> str:
@@ -613,11 +624,28 @@ def _format_subunit_new(value: dict[str, Any], parent: Company | None) -> str:
         details.append(f"Sted: {value['place']}")
     if value.get("start_date"):
         details.append(f"Oppstart: {value['start_date']}")
-    return f"*{parent_name}*\n" + "\n".join(f"– {detail}" for detail in details)
+    return format_alert_block(
+        kind="NY UNDERENHET",
+        company_name=parent_name,
+        orgnr=str(value.get("parent") or "") or None,
+        changes=details,
+    )
 
 
 def _format_subunit_changes(parent_name: str, name: str, orgnr: str, changes: list[str]) -> str:
-    return f"*{parent_name}* – {name} ({orgnr})\n" + "\n".join(f"– {change}" for change in changes)
+    return format_alert_block(
+        kind="UNDERENHETSENDRING",
+        company_name=parent_name,
+        orgnr=None,
+        changes=(f"Underenhet: {name} ({orgnr})", *changes),
+    )
+
+
+def _announcement_kind(label: str) -> str:
+    folded = label.casefold()
+    if "fisjon" in folded:
+        return "FISJON"
+    return "FUSJON"
 
 
 def _parent_from_changes(changes: Any) -> str | None:
