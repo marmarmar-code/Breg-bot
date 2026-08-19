@@ -1,0 +1,50 @@
+name: One-off Slack format test
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+
+permissions:
+  contents: read
+
+jobs:
+  send-test:
+    if: github.event.pull_request.head.ref == 'ops/slack-format-test' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out reviewed public main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Enforce public safety gate
+        run: python3 scripts/check_public_safety.py >/dev/null
+
+      - name: Send synthetic standardized Slack alert
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from breg_watch.notifier import SlackNotifier
+          from breg_watch.slack_format import format_alert_block
+
+          message = format_alert_block(
+              kind="NYTT ÅRSREGNSKAP · TEST",
+              company_name="Syntetisk test – ikke ekte BRREG-hendelse",
+              orgnr=None,
+              changes=(
+                  "Dette er et syntetisk testvarsel. Ingen BRREG-hendelse er registrert.",
+                  "Periode til: 2025-12-31",
+                  "BRREG-ID: TEST-1234567",
+              ),
+              source_url="https://www.brreg.no/",
+              source_label="Åpne BRREG (testlenke) →",
+          )
+          SlackNotifier(os.environ["SLACK_WEBHOOK_URL"]).send_text(message)
+          PY
