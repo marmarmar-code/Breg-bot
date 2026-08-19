@@ -90,7 +90,7 @@ class StructuralBrregClient(BrregClient):
         page = 0
         while True:
             params = urllib.parse.urlencode(
-                {"overordnetEnhet": parent_orgnr, "page": page, "size": 1000, "sort": "organisasjonsnummer"}
+                {"overordnetEnhet": parent_orgnr, "page": page, "size": 1000, "sort": "organisasjonsnummer,ASC"}
             )
             result = self._json(
                 self._request(f"{self.registry_base_url}/underenheter?{params}")
