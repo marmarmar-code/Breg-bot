@@ -172,7 +172,7 @@ class StructuralBrregClient(BrregClient):
         return [events[key] for key in sorted(events)]
 
     def announcements_for_date(self, date_value: str) -> list[dict[str, str]]:
-        query = urllib.parse.urlencode({"datoFra": date_value, "datoTil": date_value})
+        query = urllib.parse.urlencode({"datoFra": date_value})
         url = f"{ANNOUNCEMENT_URL}?{query}"
         text = self._request_html(url)
         results: list[dict[str, str]] = []
@@ -349,6 +349,8 @@ class StructuralMonitorService:
             staged_subunits[sub_orgnr] = current
             if current.get("parent"):
                 subunit_index[sub_orgnr] = current["parent"]
+            else:
+                subunit_index.pop(sub_orgnr, None)
 
         if subunit_events:
             state_next["subunit_after_id"] = max(
@@ -414,7 +416,14 @@ class StructuralMonitorService:
                 self.repository.write_state(state)
 
         today = _oslo_date(now)
-        current_announcements = self._fetch_announcements_for_dates([today], {c.orgnr for c in active})
+        today_dt = _parse_date(today)
+        baseline_dates = [
+            value.strftime("%d.%m.%Y")
+            for value in _date_range(today_dt - timedelta(days=7), today_dt)
+        ]
+        current_announcements = self._fetch_announcements_for_dates(
+            baseline_dates, {c.orgnr for c in active}
+        )
         state["seen_announcement_ids"] = sorted(
             set(str(value) for value in state.get("seen_announcement_ids", []))
             | {item["id"] for item in current_announcements}
