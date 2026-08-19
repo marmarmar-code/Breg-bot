@@ -81,28 +81,21 @@ class BrregClientTests(unittest.TestCase):
         client, _ = self.client(
             [response(200, b"%PDF-1.4\nfixture", "application/octet-stream")]
         )
-
         result = client.annual_report("000000019", "2024")
-
         self.assertEqual(result.content_type, "application/octet-stream")
 
     def test_latest_404_means_no_available_report(self):
         client, _ = self.client([response(404, b"")])
-        result = client.latest("000000019")
-        self.assertEqual(result.data, [])
+        self.assertEqual(client.latest("000000019").data, [])
 
     def test_available_years_404_means_no_available_document(self):
         client, _ = self.client([response(404, b"")])
-        result = client.available_years("000000019")
-        self.assertEqual(result.data, [])
+        self.assertEqual(client.available_years("000000019").data, [])
 
     def test_retries_429_using_retry_after(self):
         sleeps = []
         client, _ = self.client(
-            [
-                response(429, b"", headers={"Retry-After": "7"}),
-                response(200, b"[]"),
-            ],
+            [response(429, b"", headers={"Retry-After": "7"}), response(200, b"[]")],
             sleeps=sleeps,
         )
         self.assertEqual(client.latest("000000019").data, [])
@@ -119,7 +112,6 @@ class BrregClientTests(unittest.TestCase):
         client, _ = self.client([response(200, b"not-json")])
         with self.assertRaises(InvalidResponse):
             client.latest("000000019")
-
         client, _ = self.client([response(200, b"html", "text/html")])
         with self.assertRaises(InvalidResponse):
             client.annual_report("000000019", "2024")
@@ -134,9 +126,7 @@ class BrregClientTests(unittest.TestCase):
             {"organisasjonsnummer": "000000019", "navn": "FIKTIVT SELSKAP AS"}
         ).encode()
         client, transport = self.client([response(200, body)])
-
         entity = client.registered_entity("000000019")
-
         self.assertEqual(entity, RegisteredEntity("000000019", "FIKTIVT SELSKAP AS", "active"))
         self.assertIn("/enhetsregisteret/api/enheter/000000019", transport.urls[0])
 
@@ -151,7 +141,6 @@ class BrregClientTests(unittest.TestCase):
         client, _ = self.client(
             [response(200, deleted), response(404, b""), response(410, b"")]
         )
-
         self.assertEqual(client.registered_entity("000000019").status, "deleted")
         self.assertEqual(client.registered_entity("000000019").status, "unknown")
         self.assertEqual(client.registered_entity("000000019").status, "removed")
@@ -161,9 +150,64 @@ class BrregClientTests(unittest.TestCase):
             {"organisasjonsnummer": "000000027", "navn": "FEIL ENHET AS"}
         ).encode()
         client, _ = self.client([response(200, body)])
-
         with self.assertRaises(InvalidResponse):
             client.registered_entity("000000019")
+
+    def test_reads_entity_details_and_public_roles(self):
+        entity_body = json.dumps(
+            {"organisasjonsnummer": "000000019", "navn": "FIKTIVT SELSKAP AS"}
+        ).encode()
+        roles_body = json.dumps({"rollegrupper": [{"type": {"kode": "STYRE"}, "roller": []}]}).encode()
+        client, transport = self.client(
+            [response(200, entity_body), response(200, roles_body, "application/hal+json")]
+        )
+
+        self.assertEqual(client.entity_details("000000019").data["navn"], "FIKTIVT SELSKAP AS")
+        self.assertEqual(client.roles("000000019").data["rollegrupper"][0]["type"]["kode"], "STYRE")
+        self.assertIn("/enheter/000000019/roller", transport.urls[1])
+
+    def test_entity_update_feed_uses_incremented_cursor_and_parses_hal(self):
+        payload = {
+            "_embedded": {
+                "oppdaterteEnheter": [
+                    {
+                        "oppdateringsid": 42,
+                        "organisasjonsnummer": "000000019",
+                        "endringstype": "Endring",
+                    }
+                ]
+            },
+            "page": {"totalPages": 1},
+        }
+        client, transport = self.client(
+            [response(200, json.dumps(payload).encode(), "application/hal+json")]
+        )
+
+        events = client.entity_updates(["000000019"], after_id=41)
+
+        self.assertEqual(events[0]["oppdateringsid"], 42)
+        self.assertIn("oppdateringsid=42", transport.urls[0])
+        self.assertIn("includeChanges=true", transport.urls[0])
+        self.assertIn("organisasjonsnummer=000000019", transport.urls[0])
+
+    def test_role_update_feed_accepts_cloud_events_media_type(self):
+        payload = [
+            {
+                "specversion": "1.0",
+                "id": 77,
+                "time": "2026-08-19T11:00:00Z",
+                "data": {"organisasjonsnummer": "000000019"},
+            }
+        ]
+        client, transport = self.client(
+            [response(200, json.dumps(payload).encode(), "application/cloudevents-batch+json")]
+        )
+
+        events = client.role_updates(["000000019"], after_id=76)
+
+        self.assertEqual(events[0]["id"], 77)
+        self.assertIn("afterId=76", transport.urls[0])
+        self.assertIn("organisasjonsnummer=000000019", transport.urls[0])
 
 
 if __name__ == "__main__":

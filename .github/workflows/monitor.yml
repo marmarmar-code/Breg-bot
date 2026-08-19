@@ -1,4 +1,4 @@
-name: Monitor annual accounts
+name: Monitor BRREG changes
 
 on:
   schedule:
@@ -24,7 +24,7 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       BREG_PUBLIC_RUNNER: "1"
     defaults:
@@ -131,7 +131,7 @@ jobs:
         if: github.event_name == 'schedule' || inputs.operation == 'run'
         run: python3 -m breg_watch rebuild >/dev/null
 
-      - name: Monitor BRREG and notify Slack privately
+      - name: Monitor annual accounts and notify Slack privately
         id: monitor
         if: github.event_name == 'schedule' || inputs.operation == 'run'
         timeout-minutes: 17
@@ -148,6 +148,23 @@ jobs:
             --documents-dir documents \
             --notify slack \
             --trigger "${{ github.event_name }}" \
+            --timeout 60 \
+            --redact-output
+
+      - name: Monitor entity and role changes privately
+        id: registry
+        if: github.event_name == 'schedule' || inputs.operation == 'run'
+        timeout-minutes: 15
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SLACK_WEBHOOK_URL" ]]; then
+            echo "SLACK_WEBHOOK_URL secret is not configured" >&2
+            exit 1
+          fi
+          python3 -m breg_watch run-registry \
+            --notify slack \
             --timeout 60 \
             --redact-output
 
@@ -172,7 +189,7 @@ jobs:
             exit 1
           fi
           if ! git diff --cached --quiet; then
-            if ! git commit --quiet -m "chore: update annual account monitor data" >/dev/null 2>&1; then
+            if ! git commit --quiet -m "chore: update BRREG monitor data" >/dev/null 2>&1; then
               echo "Could not commit private runtime metadata" >&2
               exit 1
             fi
