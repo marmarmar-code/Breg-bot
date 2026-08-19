@@ -1,9 +1,6 @@
 name: Monitor BRREG changes
 
 on:
-  push:
-    branches:
-      - main
   schedule:
     - cron: "47 * * * *"
   workflow_dispatch:
@@ -69,7 +66,7 @@ jobs:
         run: python3 -m breg_watch test-slack
 
       - name: Materialize, mask and cross-check private company list
-        if: github.event_name == 'push' || github.event_name == 'schedule' || inputs.operation == 'run'
+        if: github.event_name == 'schedule' || inputs.operation == 'run'
         env:
           BREG_COMPANIES_CSV_B64: ${{ secrets.BREG_COMPANIES_CSV_B64 }}
         run: |
@@ -131,12 +128,12 @@ jobs:
           fi
 
       - name: Rebuild private working database
-        if: github.event_name == 'push' || github.event_name == 'schedule' || inputs.operation == 'run'
+        if: github.event_name == 'schedule' || inputs.operation == 'run'
         run: python3 -m breg_watch rebuild >/dev/null
 
       - name: Monitor annual accounts and notify Slack privately
         id: monitor
-        if: github.event_name == 'push' || github.event_name == 'schedule' || inputs.operation == 'run'
+        if: github.event_name == 'schedule' || inputs.operation == 'run'
         timeout-minutes: 17
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -156,7 +153,7 @@ jobs:
 
       - name: Monitor entity and role changes privately
         id: registry
-        if: github.event_name == 'push' || github.event_name == 'schedule' || inputs.operation == 'run'
+        if: github.event_name == 'schedule' || inputs.operation == 'run'
         timeout-minutes: 15
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -173,7 +170,7 @@ jobs:
 
       - name: Monitor capital, subunits and merger/demerger notices privately
         id: structural
-        if: github.event_name == 'push' || github.event_name == 'schedule' || inputs.operation == 'run'
+        if: github.event_name == 'schedule' || inputs.operation == 'run'
         timeout-minutes: 15
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -190,7 +187,7 @@ jobs:
 
       - name: Enforce private Git storage budget
         id: budget
-        if: always() && (github.event_name == 'push' || github.event_name == 'schedule' || inputs.operation == 'run')
+        if: always() && (github.event_name == 'schedule' || inputs.operation == 'run')
         run: |
           if ! python3 -m breg_watch budget-check --max-bytes 800000000 data site >/dev/null 2>&1; then
             echo "Private runtime storage budget exceeded" >&2
@@ -198,7 +195,7 @@ jobs:
           fi
 
       - name: Commit private metadata and overview
-        if: always() && (github.event_name == 'push' || github.event_name == 'schedule' || inputs.operation == 'run') && steps.budget.outcome == 'success'
+        if: always() && (github.event_name == 'schedule' || inputs.operation == 'run') && steps.budget.outcome == 'success'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
