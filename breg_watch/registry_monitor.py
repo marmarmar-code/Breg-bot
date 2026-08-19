@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterable
 
 from .brreg import BrregClient, InvalidResponse
 from .companies import Company
+from .slack_format import combine_alert_blocks, format_alert_block
 
 
 IMPORTANT_ROLES = {
@@ -20,6 +21,7 @@ IMPORTANT_ROLES = {
     "MEDL": "Styremedlem",
 }
 ROLE_ORDER = tuple(IMPORTANT_ROLES)
+ROLE_CHANGE_PREFIXES = tuple(IMPORTANT_ROLES.values())
 
 
 class RegistryRepository:
@@ -342,14 +344,28 @@ def diff_roles(previous: Any, current: Any) -> list[str]:
 
 
 def format_slack_alert(alerts: list[dict[str, Any]]) -> str:
-    lines = ["*Ny BRREG-endring oppdaget*", ""]
+    blocks = []
     for alert in alerts:
-        lines.append(f"• *{alert['company_name']}* ({alert['orgnr']})")
-        for change in alert["changes"]:
-            lines.append(f"  – {change}")
-        lines.append("")
-    lines.append("Kilde: Brønnøysundregistrene")
-    return "\n".join(lines).rstrip()
+        changes = [str(change) for change in alert.get("changes", [])]
+        blocks.append(
+            format_alert_block(
+                kind=_alert_kind(changes),
+                company_name=str(alert["company_name"]),
+                orgnr=str(alert["orgnr"]),
+                changes=changes,
+            )
+        )
+    return combine_alert_blocks(blocks)
+
+
+def _alert_kind(changes: list[str]) -> str:
+    has_role = any(change.startswith(ROLE_CHANGE_PREFIXES) for change in changes)
+    has_entity = any(not change.startswith(ROLE_CHANGE_PREFIXES) for change in changes)
+    if has_role and has_entity:
+        return "SELSKAPS- OG ROLLEENDRING"
+    if has_role:
+        return "ROLLEENDRING"
+    return "SELSKAPSENDRING"
 
 
 def _role_holder(role: dict[str, Any]) -> str | None:
