@@ -97,8 +97,7 @@ class RegistryMonitorService:
         if not state.get("baseline_complete"):
             return self._baseline(active, state, now)
 
-        # New companies added after the original baseline get a silent first snapshot,
-        # matching the annual-account monitor's no-false-alert baseline semantics.
+        # Newly added companies get a silent first snapshot, matching annual-account baseline semantics.
         newly_baselined = 0
         for company in active:
             if self.repository.read_snapshot(company.orgnr) is None:
@@ -140,7 +139,6 @@ class RegistryMonitorService:
         for orgnr in affected:
             previous = self.repository.read_snapshot(orgnr)
             if previous is None:
-                # Defensive fallback for state imported from an older version.
                 staged[orgnr] = self._fetch_snapshot(orgnr)
                 continue
             current = deepcopy(previous)
@@ -164,8 +162,7 @@ class RegistryMonitorService:
                     }
                 )
 
-        # Do not advance cursors or snapshots until private notification succeeds.
-        # A transient failure therefore retries the same BRREG changes next hour.
+        # Snapshots/cursors advance only after private notification succeeds, so failures retry next run.
         if alerts and self.notifier is not None:
             self.notifier.send_text(format_slack_alert(alerts))
 
@@ -182,11 +179,7 @@ class RegistryMonitorService:
         self.repository.write_state(state)
 
         if self.redact_identifiers:
-            self.logger.info(
-                "Registry monitor completed; affected=%s alerts=%s",
-                len(affected),
-                len(alerts),
-            )
+            self.logger.info("Registry monitor completed")
         else:
             self.logger.info("Registry monitor completed; affected=%s alerts=%s", affected, len(alerts))
         return {
@@ -223,7 +216,10 @@ class RegistryMonitorService:
             state["last_checked_at"] = now
             self.repository.write_state(state)
 
-        self.logger.info("Registry baseline completed for %s monitored companies", len(active))
+        if self.redact_identifiers:
+            self.logger.info("Registry baseline completed")
+        else:
+            self.logger.info("Registry baseline completed for %s monitored companies", len(active))
         return {
             "status": "success",
             "baseline": True,
@@ -242,12 +238,10 @@ class RegistryMonitorService:
 def canonical_entity(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise InvalidResponse("Entity payload must be a JSON object")
-    organisation = payload.get("organisasjonsform")
-    industry = payload.get("naeringskode1")
     return {
         "name": _clean_string(payload.get("navn")),
-        "organisation_form": _coded_value(organisation),
-        "industry": _coded_value(industry),
+        "organisation_form": _coded_value(payload.get("organisasjonsform")),
+        "industry": _coded_value(payload.get("naeringskode1")),
         "bankrupt": bool(payload.get("konkurs")),
         "liquidating": bool(payload.get("underAvvikling")),
         "forced_liquidation": bool(payload.get("underTvangsavviklingEllerTvangsopplosning")),
@@ -284,7 +278,6 @@ def diff_entity(previous: Any, current: Any) -> list[str]:
     old = previous if isinstance(previous, dict) else {}
     new = current if isinstance(current, dict) else {}
     changes: list[str] = []
-
     old_name = _clean_string(old.get("name"))
     new_name = _clean_string(new.get("name"))
     if old_name and new_name and old_name != new_name:
@@ -305,9 +298,7 @@ def diff_entity(previous: Any, current: Any) -> list[str]:
     old_form = _coded_value(old.get("organisation_form"))
     new_form = _coded_value(new.get("organisation_form"))
     if old_form.get("code") and new_form.get("code") and old_form != new_form:
-        changes.append(
-            f"Organisasjonsform: {_coded_display(old_form)} → {_coded_display(new_form)}"
-        )
+        changes.append(f"Organisasjonsform: {_coded_display(old_form)} → {_coded_display(new_form)}")
 
     old_industry = _coded_value(old.get("industry"))
     new_industry = _coded_value(new.get("industry"))
@@ -406,4 +397,4 @@ def _clean_string(value: Any) -> str | None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
