@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
@@ -149,7 +149,7 @@ class StructuralBrregClient(BrregClient):
             if after_id is not None:
                 params["oppdateringsid"] = after_id + 1
             else:
-                params["dato"] = after_time
+                params["dato"] = _brreg_timestamp(after_time)
             query = urllib.parse.urlencode(params)
             result = self._json(
                 self._request(f"{self.registry_base_url}/oppdateringer/underenheter?{query}")
@@ -277,7 +277,7 @@ class StructuralMonitorService:
             else None,
             after_time=None
             if isinstance(state.get("capital_after_id"), int)
-            else str(state.get("capital_after_time") or state["baseline_started_at"]),
+            else _brreg_timestamp(str(state.get("capital_after_time") or state["baseline_started_at"])),
         )
         for event in entity_events:
             orgnr = event.get("organisasjonsnummer")
@@ -302,7 +302,7 @@ class StructuralMonitorService:
             else None,
             after_time=None
             if isinstance(state.get("subunit_after_id"), int)
-            else str(state.get("subunit_after_time") or state["baseline_started_at"]),
+            else _brreg_timestamp(str(state.get("subunit_after_time") or state["baseline_started_at"])),
         )
         subunit_index = state_next.setdefault("subunit_index", {})
         if not isinstance(subunit_index, dict):
@@ -430,8 +430,8 @@ class StructuralMonitorService:
             | {item["id"] for item in current_announcements}
         )[-5000:]
         state["announcement_last_date"] = today
-        state["capital_after_time"] = state["baseline_started_at"]
-        state["subunit_after_time"] = state["baseline_started_at"]
+        state["capital_after_time"] = _brreg_timestamp(state["baseline_started_at"])
+        state["subunit_after_time"] = _brreg_timestamp(state["baseline_started_at"])
         state["baseline_complete"] = True
         state["baseline_completed_at"] = now
         state["last_checked_at"] = now
@@ -723,8 +723,15 @@ def _fmt_int(value: Any) -> str:
     return "ikke registrert" if value is None else f"{value:,}".replace(",", " ")
 
 
+def _brreg_timestamp(value: str) -> str:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def _now() -> str:
-    return datetime.now().astimezone().isoformat(timespec="milliseconds")
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _oslo_date(now_value: str) -> str:
