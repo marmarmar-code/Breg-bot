@@ -33,7 +33,7 @@ class SlackNotifierTests(unittest.TestCase):
         self.assertNotIn("SECRET", payload.decode("utf-8"))
         self.assertGreater(timeout, 0)
 
-    def test_notify_formats_annual_account_alert(self):
+    def test_notify_formats_standardized_annual_account_alert_with_brreg_link(self):
         transport = FakeSlackTransport()
         notifier = SlackNotifier(
             "https://hooks.slack.com/services/T000/B000/SECRET",
@@ -46,18 +46,48 @@ class SlackNotifierTests(unittest.TestCase):
                 "orgnr": "000000019",
                 "report_id": 123,
                 "period_to": "2025-12-31",
-                "archive_reference": "https://github.invalid/report.pdf",
+                "archive_reference": "documents/local-report.pdf",
             }
         ]
 
         reference = notifier.notify("run-1", filings)
 
         payload = json.loads(transport.calls[0][1].decode("utf-8"))["text"]
-        self.assertIn("Eksempel AS", payload)
-        self.assertIn("2025-12-31", payload)
-        self.assertIn("https://github.invalid/report.pdf", payload)
+        self.assertIn("*BRREG-VARSEL · NYTT ÅRSREGNSKAP*", payload)
+        self.assertIn("*Eksempel AS*", payload)
+        self.assertIn("Org.nr. 000000019", payload)
+        self.assertIn("Periode til: 2025-12-31", payload)
+        self.assertIn("BRREG-ID: 123", payload)
+        self.assertIn(
+            "https://data.brreg.no/regnskapsregisteret/regnskap/aarsregnskap/kopi/000000019/2025",
+            payload,
+        )
+        self.assertIn("Åpne årsregnskapet hos BRREG →", payload)
+        self.assertNotIn("documents/local-report.pdf", payload)
         self.assertEqual(reference, "slack:run-1")
         self.assertEqual(notifier.channel, "slack")
+
+    def test_notify_prefers_stored_brreg_source_url(self):
+        transport = FakeSlackTransport()
+        notifier = SlackNotifier(
+            "https://hooks.slack.com/services/T000/B000/SECRET",
+            transport=transport,
+            sleep=lambda _: None,
+        )
+        filings = [
+            {
+                "company_name": "Eksempel AS",
+                "orgnr": "000000019",
+                "report_id": 123,
+                "period_to": "2025-12-31",
+                "source_url": "https://data.brreg.no/example/report.pdf",
+            }
+        ]
+
+        notifier.notify("run-2", filings)
+
+        payload = json.loads(transport.calls[0][1].decode("utf-8"))["text"]
+        self.assertIn("https://data.brreg.no/example/report.pdf", payload)
 
     def test_retries_temporary_slack_failure(self):
         transport = FakeSlackTransport([500, 200])
