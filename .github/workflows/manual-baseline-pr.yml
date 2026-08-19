@@ -1,0 +1,122 @@
+name: One-off private BRREG baseline
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: breg-watch-monitor
+  cancel-in-progress: false
+
+jobs:
+  baseline:
+    if: github.head_ref == 'ops/manual-baseline-pr'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BREG_PUBLIC_RUNNER: "1"
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - name: Check out reviewed public source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: marmarmar-code/Breg-bot
+          ref: main
+          path: public-source
+          persist-credentials: false
+
+      - name: Enforce public source safety
+        working-directory: public-source
+        run: python3 scripts/check_public_safety.py >/dev/null
+
+      - name: Check out private runtime
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: marmarmar-code/Breg-bot-runtime
+          ref: main
+          path: runtime
+          ssh-key: ${{ secrets.RUNTIME_DEPLOY_KEY }}
+
+      - name: Verify production code matches reviewed public source
+        run: |
+          set -euo pipefail
+          if ! diff -qr ../public-source/breg_watch breg_watch >/dev/null 2>&1; then
+            echo "Private runtime code differs from reviewed public source" >&2
+            exit 1
+          fi
+
+      - name: Materialize, mask and validate private company list
+        env:
+          BREG_COMPANIES_CSV_B64: ${{ secrets.BREG_COMPANIES_CSV_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -z "$BREG_COMPANIES_CSV_B64" ]]; then
+            echo "Private company list secret is not configured" >&2
+            exit 1
+          fi
+          printf '%s' "$BREG_COMPANIES_CSV_B64" | base64 --decode > companies.csv
+          python3 - <<'PY'
+          import csv
+          def escape(value: str) -> str:
+              return value.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          with open('companies.csv', encoding='utf-8', newline='') as handle:
+              for row in csv.DictReader(handle):
+                  for key in ('orgnr', 'name'):
+                      value = (row.get(key) or '').strip()
+                      if value:
+                          print(f'::add-mask::{escape(value)}')
+          PY
+          if ! python3 -m breg_watch validate --companies companies.csv >/dev/null 2>&1; then
+            echo "Private company list secret is invalid" >&2
+            exit 1
+          fi
+
+      - name: Establish entity and role baseline
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          python3 -m breg_watch run-registry \
+            --notify slack \
+            --timeout 60 \
+            --redact-output
+
+      - name: Establish structural baseline
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          python3 -m breg_watch.structural_monitor \
+            --notify slack \
+            --timeout 60 \
+            --redact-output
+
+      - name: Commit private baseline state
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if ! git diff --cached --quiet -- companies.csv; then
+            echo "Private company list must never be committed" >&2
+            exit 1
+          fi
+          if ! git diff --cached --quiet; then
+            git commit --quiet -m "chore: establish BRREG monitoring baseline" >/dev/null 2>&1
+            for attempt in 1 2 3; do
+              if git pull --rebase --quiet origin main >/dev/null 2>&1 && git push --quiet origin HEAD:main >/dev/null 2>&1; then
+                exit 0
+              fi
+              git rebase --abort >/dev/null 2>&1 || true
+              sleep $((attempt * 2))
+            done
+            echo "Could not synchronize private baseline state" >&2
+            exit 1
+          fi
