@@ -97,7 +97,6 @@ class RegistryMonitorService:
         if not state.get("baseline_complete"):
             return self._baseline(active, state, now)
 
-        # Newly added companies get a silent first snapshot, matching annual-account baseline semantics.
         newly_baselined = 0
         for company in active:
             if self.repository.read_snapshot(company.orgnr) is None:
@@ -120,11 +119,14 @@ class RegistryMonitorService:
             else str(state.get("role_after_time") or state["baseline_started_at"]),
         )
 
-        entity_orgnrs = {
-            str(event.get("organisasjonsnummer"))
-            for event in entity_events
-            if isinstance(event.get("organisasjonsnummer"), str)
-        }
+        entity_event_types: dict[str, set[str]] = {}
+        for event in entity_events:
+            orgnr = event.get("organisasjonsnummer")
+            if not isinstance(orgnr, str):
+                continue
+            kind = event.get("endringstype")
+            entity_event_types.setdefault(orgnr, set()).add(str(kind) if kind else "")
+        entity_orgnrs = set(entity_event_types)
         role_orgnrs = {
             str(event.get("data", {}).get("organisasjonsnummer"))
             for event in role_events
@@ -145,7 +147,11 @@ class RegistryMonitorService:
             changes: list[str] = []
             if orgnr in entity_orgnrs:
                 entity = canonical_entity(self.client.entity_details(orgnr).data)
-                changes.extend(diff_entity(previous.get("entity", {}), entity))
+                entity_changes = diff_entity(previous.get("entity", {}), entity)
+                _add_terminal_entity_event_changes(
+                    entity_changes, entity_event_types.get(orgnr, set())
+                )
+                changes.extend(entity_changes)
                 current["entity"] = entity
             if orgnr in role_orgnrs:
                 roles = canonical_roles(self.client.roles(orgnr).data)
@@ -162,7 +168,6 @@ class RegistryMonitorService:
                     }
                 )
 
-        # Snapshots/cursors advance only after private notification succeeds, so failures retry next run.
         if alerts and self.notifier is not None:
             self.notifier.send_text(format_slack_alert(alerts))
 
@@ -305,6 +310,15 @@ def diff_entity(previous: Any, current: Any) -> list[str]:
     if old_industry.get("code") and new_industry.get("code") and old_industry != new_industry:
         changes.append(f"Næringskode: {_coded_display(old_industry)} → {_coded_display(new_industry)}")
     return changes
+
+
+def _add_terminal_entity_event_changes(changes: list[str], event_types: set[str]) -> None:
+    for event_type, label in (
+        ("Sletting", "Slettet fra Enhetsregisteret"),
+        ("Fjernet", "Fjernet fra BRREG Åpne Data"),
+    ):
+        if event_type in event_types and not any(change.startswith(f"{label}:") for change in changes):
+            changes.append(f"{label}: ja")
 
 
 def diff_roles(previous: Any, current: Any) -> list[str]:
