@@ -1,0 +1,137 @@
+name: One-off Slack batch format test
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+
+permissions:
+  contents: read
+
+jobs:
+  send-test:
+    if: github.event.pull_request.head.ref == 'ops/slack-batch-test' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out reviewed public main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Enforce public safety gate
+        run: python3 scripts/check_public_safety.py >/dev/null
+
+      - name: Send synthetic multi-alert Slack batch
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from breg_watch.notifier import SlackNotifier
+          from breg_watch.slack_format import combine_alert_blocks, format_alert_block
+
+          blocks = [
+              format_alert_block(
+                  kind="NYTT ÅRSREGNSKAP · TEST",
+                  company_name="Testavisen AS",
+                  orgnr="999999999",
+                  changes=(
+                      "SYNTHETISK TEST – ikke ekte BRREG-hendelse",
+                      "Periode til: 2025-12-31",
+                      "BRREG-ID: TEST-ÅR-001",
+                  ),
+                  source_url="https://www.brreg.no/",
+                  source_label="Åpne årsregnskapet hos BRREG (test) →",
+              ),
+              format_alert_block(
+                  kind="ROLLEENDRING · TEST",
+                  company_name="Eksempel Media AS",
+                  orgnr="999999998",
+                  changes=(
+                      "Daglig leder: Kari Gammel → Ola Ny",
+                      "Styreleder: Per Hansen → Anne Olsen",
+                      "Styremedlem ut: Test Person",
+                      "Styremedlem inn: Ny Testperson",
+                  ),
+              ),
+              format_alert_block(
+                  kind="SELSKAPSENDRING · TEST",
+                  company_name="Gamle Medier AS",
+                  orgnr="999999997",
+                  changes=(
+                      "Navn: Gamle Medier AS → Nye Medier AS",
+                      "Næringskode: 58.130 Utgivelse av aviser → 63.910 Nyhetsbyråvirksomhet",
+                      "Avvikling: ja",
+                  ),
+              ),
+              format_alert_block(
+                  kind="KAPITALENDRING · TEST",
+                  company_name="Kapital Media AS",
+                  orgnr="999999996",
+                  changes=(
+                      "Kapital: 100 000 NOK → 2 000 000 NOK",
+                      "Antall aksjer: 100 → 2 000",
+                      "Innbetalt kapital: 100 000 NOK → 2 000 000 NOK",
+                  ),
+              ),
+              format_alert_block(
+                  kind="NY UNDERENHET · TEST",
+                  company_name="Lokalgruppen AS",
+                  orgnr="999999995",
+                  changes=(
+                      "Ny underenhet: Lokalgruppen Tromsø (888888881)",
+                      "Sted: Tromsø",
+                      "Oppstart: 2026-08-19",
+                  ),
+              ),
+              format_alert_block(
+                  kind="UNDERENHETSENDRING · TEST",
+                  company_name="Regionmedia AS",
+                  orgnr=None,
+                  changes=(
+                      "Underenhet: Regionmedia Bergen (888888882)",
+                      "Sted: Bergen → Oslo",
+                      "Nedlagt: 2026-08-19",
+                  ),
+              ),
+              format_alert_block(
+                  kind="FUSJON · TEST",
+                  company_name="Fusjon Media AS",
+                  orgnr="999999994",
+                  changes=(
+                      "Fusjonsplan registrert 19.08.2026",
+                      "SYNTHETISK TEST – ikke ekte kunngjøring",
+                  ),
+                  source_url="https://www.brreg.no/registersok/kunngjoringer/",
+                  source_label="Se kunngjøringen hos BRREG (test) →",
+              ),
+              format_alert_block(
+                  kind="FISJON · TEST",
+                  company_name="Delingsmedia AS",
+                  orgnr="999999993",
+                  changes=(
+                      "Gjennomføring av fisjon registrert 19.08.2026",
+                      "SYNTHETISK TEST – ikke ekte kunngjøring",
+                  ),
+                  source_url="https://www.brreg.no/registersok/kunngjoringer/",
+                  source_label="Se kunngjøringen hos BRREG (test) →",
+              ),
+              format_alert_block(
+                  kind="SELSKAPS- OG ROLLEENDRING · TEST",
+                  company_name="Alt På En Gang AS",
+                  orgnr="999999992",
+                  changes=(
+                      "Daglig leder: Test Leder → Ny Leder",
+                      "Navn: Alt På En Gang AS → Nytt Navn AS",
+                      "Konkurs: ja",
+                  ),
+              ),
+          ]
+
+          message = "*SYNTHETISK MASSETEST – ingen av hendelsene nedenfor er ekte*\n\n" + combine_alert_blocks(blocks)
+          SlackNotifier(os.environ["SLACK_WEBHOOK_URL"]).send_text(message)
+          PY
