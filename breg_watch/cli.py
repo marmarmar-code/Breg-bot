@@ -20,6 +20,7 @@ from .companies import (
 from .html_report import render_overview
 from .metadata import MetadataRepository, rebuild_database
 from .notifier import GitHubIssueNotifier, NotificationError, SlackNotifier
+from .registry_monitor import RegistryMonitorService, RegistryRepository
 from .service import MonitorService
 from .store import Store
 
@@ -54,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("test-slack", help="Send a Slack smoke-test notification")
 
-    run = subparsers.add_parser("run", help="Check active companies")
+    run = subparsers.add_parser("run", help="Check active companies for annual accounts")
     run.add_argument("--companies", default="companies.csv")
     run.add_argument("--metadata-dir", default="data")
     run.add_argument("--db", default="state/monitor.sqlite")
@@ -70,6 +71,21 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--request-interval", type=float, default=0.25)
     run.add_argument("--max-document-bytes", type=int, default=100 * 1024 * 1024)
     run.add_argument(
+        "--redact-output",
+        action="store_true",
+        help="Hide monitored organisation identifiers from stdout and logs",
+    )
+
+    registry = subparsers.add_parser(
+        "run-registry", help="Check BRREG entity and role changes for active companies"
+    )
+    registry.add_argument("--companies", default="companies.csv")
+    registry.add_argument("--metadata-dir", default="data")
+    registry.add_argument("--notify", choices=("none", "slack"), default="none")
+    registry.add_argument("--timeout", type=float, default=20.0)
+    registry.add_argument("--max-attempts", type=int, default=3)
+    registry.add_argument("--request-interval", type=float, default=0.25)
+    registry.add_argument(
         "--redact-output",
         action="store_true",
         help="Hide monitored organisation identifiers from stdout and logs",
@@ -127,6 +143,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "run":
             return _run_monitor(args)
+        if args.command == "run-registry":
+            return _run_registry_monitor(args)
     except (BrregError, CompanyListError, NotificationError, ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
@@ -191,6 +209,15 @@ def _enforce_public_runner_policy(args: argparse.Namespace) -> None:
         )
 
 
+def _enforce_registry_public_runner_policy(args: argparse.Namespace) -> None:
+    if os.environ.get(PUBLIC_RUNNER_ENV) != "1":
+        return
+    if args.notify != "slack" or not args.redact_output:
+        raise ValueError(
+            "Public runner policy requires private Slack registry notifications and redacted output"
+        )
+
+
 def _run_monitor(args: argparse.Namespace) -> int:
     _enforce_public_runner_policy(args)
     companies = load_companies(args.companies)
@@ -251,6 +278,39 @@ def _run_monitor(args: argparse.Namespace) -> int:
         return 0 if summary["status"] == "success" else 1
     finally:
         store.close()
+
+
+def _run_registry_monitor(args: argparse.Namespace) -> int:
+    _enforce_registry_public_runner_policy(args)
+    companies = load_companies(args.companies)
+    notifier = (
+        SlackNotifier(os.environ.get("SLACK_WEBHOOK_URL", ""))
+        if args.notify == "slack"
+        else None
+    )
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    service = RegistryMonitorService(
+        client=BrregClient(
+            timeout=args.timeout,
+            max_attempts=args.max_attempts,
+            request_interval=args.request_interval,
+        ),
+        repository=RegistryRepository(args.metadata_dir),
+        notifier=notifier,
+        redact_identifiers=args.redact_output,
+    )
+    summary = service.run(companies)
+    print(
+        json.dumps(
+            _summary_for_output(summary, redact=args.redact_output),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0 if summary["status"] == "success" else 1
 
 
 def _summary_for_output(summary: dict, *, redact: bool) -> dict:
