@@ -1,0 +1,9 @@
+[project]
+name = "breg-watch"
+version = "0.1.0"
+description = "Zero-cost monitor for new Norwegian annual accounts"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.unittest]
+start-directory = "tests"

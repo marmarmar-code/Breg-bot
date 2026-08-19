@@ -1,0 +1,189 @@
+name: Monitor annual accounts
+
+on:
+  schedule:
+    - cron: "47 * * * *"
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Hva vil du gjøre?"
+        required: true
+        default: "run"
+        type: choice
+        options:
+          - run
+          - test-slack
+
+permissions:
+  contents: read
+
+concurrency:
+  group: breg-watch-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BREG_PUBLIC_RUNNER: "1"
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - name: Check out reviewed public source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          path: public-source
+          persist-credentials: false
+
+      - name: Enforce public source safety before accessing production
+        working-directory: public-source
+        run: python3 scripts/check_public_safety.py >/dev/null
+
+      - name: Check out private runtime
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: marmarmar-code/Breg-bot-runtime
+          ref: main
+          path: runtime
+          ssh-key: ${{ secrets.RUNTIME_DEPLOY_KEY }}
+
+      - name: Verify production code matches reviewed public source
+        run: |
+          set -euo pipefail
+          if ! diff -qr ../public-source/breg_watch breg_watch >/dev/null 2>&1; then
+            echo "Private runtime code differs from reviewed public source" >&2
+            exit 1
+          fi
+          python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+
+      - name: Test Slack notification
+        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'test-slack'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python3 -m breg_watch test-slack
+
+      - name: Materialize, mask and cross-check private company list
+        if: github.event_name == 'schedule' || inputs.operation == 'run'
+        env:
+          BREG_COMPANIES_CSV_B64: ${{ secrets.BREG_COMPANIES_CSV_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -z "$BREG_COMPANIES_CSV_B64" ]]; then
+            echo "Private company list secret is not configured" >&2
+            exit 1
+          fi
+          printf '%s' "$BREG_COMPANIES_CSV_B64" | base64 --decode > companies.csv
+          python3 - <<'PY'
+          import csv
+
+          def escape(value: str) -> str:
+              return value.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+
+          with open('companies.csv', encoding='utf-8', newline='') as handle:
+              for row in csv.DictReader(handle):
+                  for key in ('orgnr', 'name'):
+                      value = (row.get(key) or '').strip()
+                      if value:
+                          print(f'::add-mask::{escape(value)}')
+          PY
+          if ! python3 -m breg_watch validate --companies companies.csv >/dev/null 2>&1; then
+            echo "Private company list secret is invalid" >&2
+            exit 1
+          fi
+          if ! python3 - <<'PY' >/dev/null 2>&1
+          import csv
+          from pathlib import Path
+
+          orgnrs = set()
+          names = set()
+          with open('companies.csv', encoding='utf-8', newline='') as handle:
+              for row in csv.DictReader(handle):
+                  orgnr = (row.get('orgnr') or '').strip()
+                  name = (row.get('name') or '').strip()
+                  if orgnr:
+                      orgnrs.add(orgnr)
+                  if len(name) >= 5:
+                      names.add(name.casefold())
+
+          for path in Path('../public-source').rglob('*'):
+              if not path.is_file() or '.git' in path.parts:
+                  continue
+              try:
+                  text = path.read_text(encoding='utf-8')
+              except (UnicodeDecodeError, OSError):
+                  continue
+              folded = text.casefold()
+              if any(orgnr in text for orgnr in orgnrs):
+                  raise SystemExit(1)
+              if any(name in folded for name in names):
+                  raise SystemExit(1)
+          PY
+          then
+            echo "Reviewed public source contains a private monitored identity" >&2
+            exit 1
+          fi
+
+      - name: Rebuild private working database
+        if: github.event_name == 'schedule' || inputs.operation == 'run'
+        run: python3 -m breg_watch rebuild >/dev/null
+
+      - name: Monitor BRREG and notify Slack privately
+        id: monitor
+        if: github.event_name == 'schedule' || inputs.operation == 'run'
+        timeout-minutes: 17
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SLACK_WEBHOOK_URL" ]]; then
+            echo "SLACK_WEBHOOK_URL secret is not configured" >&2
+            exit 1
+          fi
+          python3 -m breg_watch run \
+            --archive local \
+            --documents-dir documents \
+            --notify slack \
+            --trigger "${{ github.event_name }}" \
+            --timeout 60 \
+            --redact-output
+
+      - name: Enforce private Git storage budget
+        id: budget
+        if: always() && (github.event_name == 'schedule' || inputs.operation == 'run')
+        run: |
+          if ! python3 -m breg_watch budget-check --max-bytes 800000000 data site >/dev/null 2>&1; then
+            echo "Private runtime storage budget exceeded" >&2
+            exit 1
+          fi
+
+      - name: Commit private metadata and overview
+        if: always() && (github.event_name == 'schedule' || inputs.operation == 'run') && steps.budget.outcome == 'success'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data site
+          if ! git diff --cached --quiet -- companies.csv; then
+            echo "Private company list must never be committed" >&2
+            exit 1
+          fi
+          if ! git diff --cached --quiet; then
+            if ! git commit --quiet -m "chore: update annual account monitor data" >/dev/null 2>&1; then
+              echo "Could not commit private runtime metadata" >&2
+              exit 1
+            fi
+            for attempt in 1 2 3; do
+              if git pull --rebase --quiet origin main >/dev/null 2>&1 && \
+                 git push --quiet origin HEAD:main >/dev/null 2>&1; then
+                exit 0
+              fi
+              git rebase --abort >/dev/null 2>&1 || true
+              sleep $((attempt * 2))
+            done
+            echo "Could not synchronize private runtime metadata" >&2
+            exit 1
+          fi

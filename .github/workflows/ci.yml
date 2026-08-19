@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Enforce public safety boundary
+        run: python3 scripts/check_public_safety.py
+
+      - name: Validate public source
+        run: |
+          python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+          python3 -m breg_watch validate --companies companies.example.csv
+          python3 -m compileall -q breg_watch tests scripts
+          python3 -m unittest discover -s tests -v

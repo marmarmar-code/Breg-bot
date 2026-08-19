@@ -1,0 +1,18 @@
+{
+  "id": 5667197,
+  "journalnr": "2025428073",
+  "regnskapstype": "SELSKAP",
+  "virksomhet": {
+    "organisasjonsnummer": "000000019",
+    "organisasjonsform": "ASA",
+    "morselskap": true
+  },
+  "regnskapsperiode": {
+    "fraDato": "2024-01-01",
+    "tilDato": "2024-12-31"
+  },
+  "valuta": "USD",
+  "resultatregnskapResultat": {
+    "aarsresultat": 8141000000.0
+  }
+}

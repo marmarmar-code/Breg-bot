@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+.venv/
+venv/
+
+# Production/log/database/document artifacts
+*.log
+*.pdf
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.html
+*.xlsx
+*.xls
+*.zip
+*.tar
+*.gz
+*.tgz
+*.7z
+
+# Production data locations
+logs/
+state/
+documents/
+data/
+site/
+companies.csv
+
+# Default-deny CSVs; only the explicit fictional example is public
+*.csv
+!companies.example.csv
