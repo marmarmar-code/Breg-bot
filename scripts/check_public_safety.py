@@ -123,15 +123,32 @@ def check_workflows(errors: list[str]) -> None:
     require(monitor, "Reviewed public source contains a private monitored identity", "watchlist/public-source cross-check", errors)
     require(monitor, "--archive local", "local-only document handling", errors)
     require(monitor, "--notify slack", "private Slack notification path", errors)
-    require(monitor, "python3 -m breg_watch run-registry", "hourly entity/role monitor", errors)
+    require(
+        monitor,
+        "python3 -m breg_watch.private_run_status registry",
+        "hourly entity/role monitor with private run status",
+        errors,
+    )
+    require(
+        monitor,
+        "python3 -m breg_watch.private_run_status structural",
+        "hourly structural monitor with private run status",
+        errors,
+    )
     require(monitor, "Monitor entity and role changes privately", "private registry workflow step", errors)
+    require(
+        monitor,
+        "Monitor capital, subunits and merger/demerger notices privately",
+        "private structural workflow step",
+        errors,
+    )
     require(monitor, "--redact-output", "redacted public output", errors)
     require(monitor, "git add data site", "private runtime metadata persistence", errors)
 
-    if monitor.count("--redact-output") < 2:
-        errors.append("annual-account and registry monitors must both use redacted output")
-    if monitor.count("--notify slack") < 2:
-        errors.append("annual-account and registry monitors must both use private Slack")
+    if monitor.count("--redact-output") < 3:
+        errors.append("annual-account, registry and structural monitors must all use redacted output")
+    if monitor.count("--notify slack") < 3:
+        errors.append("annual-account, registry and structural monitors must all use private Slack")
 
     for needle, label in (
         ("contents: write", "public contents write permission"),

@@ -163,7 +163,7 @@ jobs:
             echo "SLACK_WEBHOOK_URL secret is not configured" >&2
             exit 1
           fi
-          python3 -m breg_watch run-registry \
+          python3 -m breg_watch.private_run_status registry \
             --notify slack \
             --timeout 60 \
             --redact-output
@@ -180,7 +180,7 @@ jobs:
             echo "SLACK_WEBHOOK_URL secret is not configured" >&2
             exit 1
           fi
-          python3 -m breg_watch.structural_monitor \
+          python3 -m breg_watch.private_run_status structural \
             --notify slack \
             --timeout 60 \
             --redact-output
