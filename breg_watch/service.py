@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import logging
 import hashlib
+import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,64 @@ from .html_report import render_overview
 from .metadata import MetadataRepository
 from .notifier import NotificationError
 from .store import Store
+
+
+_FINANCIAL_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Driftsinntekter",
+        ("resultatregnskapResultat", "driftsresultat", "driftsinntekter", "sumDriftsinntekter"),
+    ),
+    (
+        "Driftskostnader",
+        ("resultatregnskapResultat", "driftsresultat", "driftskostnad", "sumDriftskostnad"),
+    ),
+    (
+        "Driftsresultat",
+        ("resultatregnskapResultat", "driftsresultat", "driftsresultat"),
+    ),
+    (
+        "Finansinntekter",
+        (
+            "resultatregnskapResultat",
+            "finansresultat",
+            "finansinntekt",
+            "sumFinansinntekter",
+        ),
+    ),
+    (
+        "Finanskostnader",
+        (
+            "resultatregnskapResultat",
+            "finansresultat",
+            "finanskostnad",
+            "sumFinanskostnad",
+        ),
+    ),
+    (
+        "Netto finans",
+        ("resultatregnskapResultat", "finansresultat", "nettoFinans"),
+    ),
+    (
+        "Resultat før skatt",
+        ("resultatregnskapResultat", "ordinaertResultatFoerSkattekostnad"),
+    ),
+    (
+        "Årsresultat",
+        ("resultatregnskapResultat", "aarsresultat"),
+    ),
+    (
+        "Sum eiendeler",
+        ("eiendeler", "sumEiendeler"),
+    ),
+    (
+        "Egenkapital",
+        ("egenkapitalGjeld", "egenkapital", "sumEgenkapital"),
+    ),
+    (
+        "Gjeld",
+        ("egenkapitalGjeld", "gjeldOversikt", "sumGjeld"),
+    ),
+)
 
 
 class MonitorService:
@@ -158,8 +217,14 @@ class MonitorService:
             try:
                 remote_reference = self.notifier.notify(notification_key, filings)
                 for filing in filings:
+                    notification_kind = str(
+                        filing.get("notification_kind") or "new_filing"
+                    )
                     self.store.record_notification(
-                        int(filing["id"]), channel, "new_filing", remote_reference
+                        int(filing["id"]),
+                        channel,
+                        notification_kind,
+                        remote_reference,
                     )
                     event_summary = self.metadata.read_event_summary(
                         str(filing["orgnr"]), int(filing["report_id"])
@@ -167,7 +232,7 @@ class MonitorService:
                     notifications = event_summary.setdefault("notifications", [])
                     record = {
                         "channel": channel,
-                        "kind": "new_filing",
+                        "kind": notification_kind,
                         "remote_reference": remote_reference,
                     }
                     if record not in notifications:
@@ -235,6 +300,17 @@ class MonitorService:
             detail_response = self.client.detail(company.orgnr, report_id)
             detail = detail_response.data
             period = detail.get("regnskapsperiode") or latest.get("regnskapsperiode") or {}
+            revision_context = None
+            if created and not baseline:
+                revision_context = self._revision_context(
+                    orgnr=company.orgnr,
+                    report_id=report_id,
+                    report_type=detail.get("regnskapstype")
+                    or latest.get("regnskapstype"),
+                    period_from=period.get("fraDato"),
+                    period_to=period.get("tilDato"),
+                    current_detail=detail,
+                )
             filing_id, actually_created = self.store.discover_filing(
                 orgnr=company.orgnr,
                 report_id=report_id,
@@ -264,6 +340,15 @@ class MonitorService:
             if baseline:
                 summary["discovery_mode"] = "baseline"
                 self.store.mark_document_deferred(filing_id, "baseline")
+            elif created:
+                if revision_context is None:
+                    summary["filing_kind"] = "new"
+                else:
+                    summary["filing_kind"] = "revision"
+                    summary["previous_report_id"] = revision_context[
+                        "previous_report_id"
+                    ]
+                    summary["changes"] = revision_context["changes"]
             if created and not baseline and self.notifier is not None:
                 summary["notification_pending"] = True
                 summary["notification_key"] = self._run_notification_key(run_id)
@@ -329,8 +414,110 @@ class MonitorService:
         ):
             if "company_name" not in current:
                 current["company_name"] = company.name
+            filing_kind = str(summary.get("filing_kind") or "new")
+            current["filing_kind"] = filing_kind
+            current["notification_kind"] = (
+                "revised_filing" if filing_kind == "revision" else "new_filing"
+            )
+            if summary.get("previous_report_id") is not None:
+                current["previous_report_id"] = summary["previous_report_id"]
+            changes = summary.get("changes")
+            current["changes"] = changes if isinstance(changes, list) else []
             notification_candidates.append(current)
         return created and not baseline
+
+    def _revision_context(
+        self,
+        *,
+        orgnr: str,
+        report_id: int,
+        report_type: Any,
+        period_from: Any,
+        period_to: Any,
+        current_detail: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not isinstance(period_from, str) or not isinstance(period_to, str):
+            return None
+
+        previous = [
+            summary
+            for summary in self.metadata.iter_event_summaries()
+            if str(summary.get("orgnr") or "") == orgnr
+            and int(summary.get("report_id") or 0) != report_id
+            and (
+                not isinstance(report_type, str)
+                or summary.get("report_type") == report_type
+            )
+            and summary.get("period_from") == period_from
+            and summary.get("period_to") == period_to
+        ]
+        if not previous:
+            return None
+
+        prior = max(
+            previous,
+            key=lambda summary: (
+                str(summary.get("discovered_at") or ""),
+                int(summary.get("report_id") or 0),
+            ),
+        )
+        previous_report_id = int(prior["report_id"])
+        previous_detail: dict[str, Any] | None = None
+        detail_path = (
+            self.metadata.root
+            / "events"
+            / orgnr
+            / str(previous_report_id)
+            / "detail.json"
+        )
+        try:
+            parsed = json.loads(detail_path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                previous_detail = parsed
+        except (OSError, json.JSONDecodeError):
+            previous_detail = None
+
+        changes = (
+            self._financial_changes(previous_detail, current_detail)
+            if previous_detail is not None
+            else []
+        )
+        return {
+            "previous_report_id": previous_report_id,
+            "changes": changes,
+        }
+
+    @classmethod
+    def _financial_changes(
+        cls,
+        previous_detail: dict[str, Any],
+        current_detail: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        changes: list[dict[str, Any]] = []
+        for label, path in _FINANCIAL_FIELDS:
+            before = cls._nested_number(previous_detail, path)
+            after = cls._nested_number(current_detail, path)
+            if before is None or after is None or before == after:
+                continue
+            changes.append(
+                {
+                    "label": label,
+                    "from": before,
+                    "to": after,
+                }
+            )
+        return changes
+
+    @staticmethod
+    def _nested_number(document: dict[str, Any], path: tuple[str, ...]) -> int | float | None:
+        value: Any = document
+        for key in path:
+            if not isinstance(value, dict):
+                return None
+            value = value.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return value
 
     def _is_baselined(self, orgnr: str) -> bool:
         status = self.metadata.read_check_status(orgnr)

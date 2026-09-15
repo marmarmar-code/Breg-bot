@@ -73,10 +73,15 @@ class GitHubIssueNotifier:
         if matches:
             return str(matches[0]["url"])
 
-        lines = [marker, "", "New annual accounts were detected:", ""]
+        lines = [marker, "", "New annual-account filings were detected:", ""]
         for filing in filings:
+            label = (
+                "revised annual account"
+                if filing.get("filing_kind") == "revision"
+                else "annual account"
+            )
             lines.append(
-                f"- {filing['company_name']} ({filing['orgnr']}), "
+                f"- {filing['company_name']} ({filing['orgnr']}), {label}, "
                 f"period ending {filing.get('period_to') or 'unknown'}, "
                 f"BRREG ID {filing['report_id']}, document {filing['document_status']}"
             )
@@ -88,7 +93,7 @@ class GitHubIssueNotifier:
                 "--repo",
                 self.repository,
                 "--title",
-                f"New annual accounts: {len(filings)} ({run_id})",
+                f"New annual-account filings: {len(filings)} ({run_id})",
                 "--body",
                 "\n".join(lines),
             ]
@@ -141,15 +146,37 @@ class SlackNotifier:
             source_url = filing.get("source_url")
             if not isinstance(source_url, str) or not source_url.startswith("https://"):
                 source_url = _annual_report_url(filing)
+
+            if filing.get("filing_kind") == "revision":
+                changes = [
+                    f"Periode til: {period_to}",
+                    f"Tidligere BRREG-ID: {filing.get('previous_report_id') or 'ukjent'}",
+                    f"Ny BRREG-ID: {filing['report_id']}",
+                ]
+                financial_changes = filing.get("changes")
+                if isinstance(financial_changes, list) and financial_changes:
+                    for change in financial_changes:
+                        line = _format_financial_change(change)
+                        if line:
+                            changes.append(line)
+                else:
+                    changes.append(
+                        "Ny BRREG-versjon registrert for samme regnskapsperiode"
+                    )
+                kind = "NY VERSJON AV ÅRSREGNSKAP"
+            else:
+                changes = [
+                    f"Periode til: {period_to}",
+                    f"BRREG-ID: {filing['report_id']}",
+                ]
+                kind = "NYTT ÅRSREGNSKAP"
+
             blocks.append(
                 format_alert_block(
-                    kind="NYTT ÅRSREGNSKAP",
+                    kind=kind,
                     company_name=str(filing["company_name"]),
                     orgnr=str(filing["orgnr"]),
-                    changes=(
-                        f"Periode til: {period_to}",
-                        f"BRREG-ID: {filing['report_id']}",
-                    ),
+                    changes=changes,
                     source_url=source_url,
                     source_label="Åpne årsregnskapet hos BRREG →",
                 )
@@ -186,6 +213,30 @@ class SlackNotifier:
             if last_status is not None
             else "Slack notification failed"
         )
+
+
+def _format_financial_change(change: Any) -> str | None:
+    if not isinstance(change, dict):
+        return None
+    label = change.get("label")
+    before = change.get("from")
+    after = change.get("to")
+    if not isinstance(label, str):
+        return None
+    if (
+        isinstance(before, bool)
+        or isinstance(after, bool)
+        or not isinstance(before, (int, float))
+        or not isinstance(after, (int, float))
+    ):
+        return None
+    return f"{label}: {_format_amount(before)} → {_format_amount(after)}"
+
+
+def _format_amount(value: int | float) -> str:
+    if float(value).is_integer():
+        return f"{int(value):,}".replace(",", " ") + " kr"
+    return f"{value:,.2f}".replace(",", " ").replace(".", ",") + " kr"
 
 
 def _annual_report_url(filing: dict[str, Any]) -> str | None:
